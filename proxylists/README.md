@@ -8,7 +8,7 @@ This script downloads content from a list of links, consolidates the results, re
 2. Run the script:
 
     ```sh
-    ./link_downloader.sh
+    ./sync-raw-file.sh
     ```
 
 ## Script Details
@@ -22,28 +22,34 @@ This script downloads content from a list of links, consolidates the results, re
 - Consolidates the downloaded content into `temp/proxies.raw`, ensuring no duplicates.
 - Cleans up temporary files after processing.
 
-## Script
+# VeriProxy Script
+
+This script verifies a list of proxies using multiple workers, categorizes them by country, and consolidates the results.
+
+## Usage
 
 ```sh
-#!/bin/bash
+./VeriProxy.sh <input_file> [number_of_workers]
+```
 
-# Define the input file containing the list of links
-links_file="links"
-output_file="temp/proxies.raw"
+`./VeriProxy.sh proxies.txt 5`
+This runs the script with 5 workers to verify proxies listed in proxies.txt.
 
-# Ensure the output file is empty or create it if it doesn't exist
-> "$output_file"
+## Description
+Splits the input file into chunks based on the number of workers.
+Checks each proxy by making a request to ipinfo.io to determine its country.
+Valid proxies are saved in the verified directory, categorized by country.
+A consolidated list of verified proxies is saved in proxies.verified.
 
-# Download each link and consolidate the results
-while IFS= read -r link; do
-  curl -sO "$link"
-done < "$links_file"
+## Features
+Concurrency: Uses multiple workers for parallel processing.
+Proxy Validation: Verifies proxies and categorizes them by country.
+Output: Consolidates results and removes duplicates.
+Dependencies
+Ensure the following dependencies are installed:
 
-# Combine the downloaded files, remove duplicates, and write to the output file
-cat *.txt | sort -u > "$output_file"
-
-[ -e temp/proxies.raw ] && echo "Saved to $output_file"
-
-# Clean up temporary files
-rm -f *.txt *.txt.*
-
+## Dependencies
+`curl`
+`awk`
+`flock (Linux)`
+`shlock (macOS)`
