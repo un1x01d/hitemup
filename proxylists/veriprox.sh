@@ -14,38 +14,41 @@ fi
 input_file="$1"
 num_workers="${2:-1}"  # Default to 1 worker if not provided
 
-verified_dir="verified/"
+verified_dir="verified-by-country"
 verified_file="proxies.verified"
 tmp_dir=".tmp_files"
 
-# Create the temporary files directory
+# Create necessary directories
 mkdir -p "$tmp_dir"
+mkdir -p "$verified_dir"
 
 # Trap to ensure cleanup on exit
 cleanup() {
+  echo "Cleaning up..."
   rm -rf "$tmp_dir"
+  rm -rf "*.lock"
   rm -f /tmp/proxy_test_output
+  for pid in "${worker_pids[@]}"; do
+    kill "$pid" 2>/dev/null
+  done
+  echo "All worker processes terminated."
+  exit 1
 }
-trap cleanup EXIT
-
-# Split the input file into the specified number of smaller files
-split -n l/"$num_workers" "$input_file" "$tmp_dir/input_file_"
-
-# Ensure all split files are sorted and contain unique entries
-for file in "$tmp_dir"/input_file_*; do
-  sort -u "$file" -o "$file"
-done
+trap cleanup SIGINT
 
 # Define a list of common proxy ports (excluding port 80)
 declare -a common_ports=("8080" "3128" "1080" "8888" "81" "8000" "8880")
 common_ports_regex=$(IFS=\|; echo "${common_ports[*]}")
+
+# Load proxies into memory from the input file, filtering by common ports
+mapfile -t proxies < <(grep -E "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:(${common_ports_regex})$" "$input_file" | sort -u)
 
 # Function to test if a proxy is working and get its country
 test_proxy() {
   local proxy=$1
   local worker_id=$2
   # Use curl to test the proxy and get the country with a 100ms timeout
-  response=$(curl -x "$proxy" -s -w "%{http_code}" --max-time 2 ipinfo.io/country -o /tmp/proxy_test_output)
+  response=$(curl -x "$proxy" -s -w "%{http_code}" --max-time 1 ipinfo.io/country -o /tmp/proxy_test_output)
   http_code=$(tail -n1 <<< "$response")
 
   if [[ "$http_code" == "200" ]]; then
@@ -67,28 +70,21 @@ test_proxy() {
   fi
 }
 
-# Function to process each smaller file
-process_file() {
+# Function to process proxies in parallel
+process_proxies() {
   local worker_id=$1
-  local file=$2
-  local sorted_file="$file.sorted"
+  local start_index=$2
+  local end_index=$3
 
   # Record start time for the worker
   start_time=$(date +%s%N)
   echo -e "- \e[1m[\e[34m$worker_id\e[0m\e[1m] started at $(date +"%T")\e[0m"
 
-  # Use grep to filter valid IP:port combinations and sort them
-  grep -E "^[1-9][0-9]{0,2}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:(${common_ports_regex})$" "$file" | sort -u > "$sorted_file"
-
-  # Read the sorted file and test each proxy
-  while IFS= read -r proxy; do
+  # Process proxies in the given range
+  for ((i = start_index; i < end_index; i++)); do
+    proxy="${proxies[$i]}"
     test_proxy "$proxy" "$worker_id"
-  done < "$sorted_file"
-
-  # Cleanup temporary sorted file
-  rm "$sorted_file"
-  # Cleanup worker's input file
-  rm "$file"
+  done
 
   # Record end time for the worker and calculate duration
   end_time=$(date +%s%N)
@@ -117,7 +113,7 @@ count_pid=$!
 overall_start_time=$(date +%s%N)
 
 # Print header with the title in "poison" font, ensuring it fits on one line
-title=$(figlet -f poison -w 80 "veriprox")
+title=$(figlet -f poison -w 80 "VeriProxy")
 title_length=$(echo "$title" | wc -L)
 divider=$(printf "%${title_length}s" | tr ' ' '=')
 echo -e "\e[31m$divider\e[0m"
@@ -125,25 +121,26 @@ echo -e "\e[32m$title\e[0m"
 echo -e "\e[31m$divider\e[0m"
 echo "Proxies will be added as they are found and also saved in $verified_file"
 
-# Display the number of lines in each worker's file
-worker_id=1
-for file in "$tmp_dir"/input_file_*; do
-  line_count=$(wc -l < "$file")
-  echo -e "- \e[1m[\e[34m$worker_id\e[0m\e[1m] processing $file: $line_count lines\e[0m"
-  worker_id=$((worker_id + 1))
-done
+# Calculate the number of proxies per worker
+total_proxies=${#proxies[@]}
+proxies_per_worker=$((total_proxies / num_workers))
 
-# Run the verification script on each smaller file in parallel
-worker_id=1
-pids=()
-for file in "$tmp_dir"/input_file_*; do
-  process_file "$worker_id" "$file" &
-  pids+=($!)
-  worker_id=$((worker_id + 1))
+# Initialize array to store worker PIDs
+worker_pids=()
+
+# Run the verification script on each chunk of proxies in parallel
+for ((worker_id = 1; worker_id <= num_workers; worker_id++)); do
+  start_index=$(( (worker_id - 1) * proxies_per_worker ))
+  end_index=$(( worker_id * proxies_per_worker ))
+  if [ $worker_id -eq $num_workers ]; then
+    end_index=$total_proxies
+  fi
+  process_proxies "$worker_id" "$start_index" "$end_index" &
+  worker_pids+=($!)
 done
 
 # Wait for all background processes to complete
-for pid in "${pids[@]}"; do
+for pid in "${worker_pids[@]}"; do
   wait $pid
 done
 
@@ -158,7 +155,7 @@ kill $count_pid
 
 # Verify that there are no duplicates post processing
 mv $verified_file "$verified_file.tmp"
-cat $verified_file.tmp | sort -u >> $verified_file
+cat $verified_file.tmp | sort -u > $verified_file
 rm -f $verified_file.tmp
 
 # Cleanup all temporary files
